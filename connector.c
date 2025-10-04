@@ -3,7 +3,6 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
-#include <curl/curl.h>
 #include <ifaddrs.h>
 #include <json-c/json.h>
 #include <math.h>
@@ -28,6 +27,7 @@
 #include "include/mqtt_linux.h"
 #define CONFIG_MAX_ENTRIES 48
 #include "include/config_linux.h"
+#include "include/http_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -44,6 +44,8 @@
 #define MQTT_TOPIC_PREFIX_DEFAULT "system/connection"
 
 #define MAX_UPNP_MAPPINGS 10
+
+#define IP_ADDRESS_URL "https://api.ipify.org"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -148,87 +150,43 @@ char hostname[256];
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
-typedef struct {
-    char *data;
-    size_t size;
-} curl_response_t;
+static bool get_public_ip(char *string, size_t length) { return http_get(IP_ADDRESS_URL, string, length); }
 
-static size_t curl_write_callback_xxx(void *contents, size_t size, size_t nmemb, void *userp) {
-    curl_response_t *mem = (curl_response_t *)userp;
-    char *ptr            = realloc(mem->data, mem->size + (size * nmemb) + 1);
-    if (!ptr)
-        return 0;
-    mem->data = ptr;
-    memcpy(&(mem->data[mem->size]), contents, (size * nmemb));
-    mem->size += (size * nmemb);
-    mem->data[mem->size] = 0;
-    return (size * nmemb);
+static bool get_local_ip(char *string, size_t length) {
+    struct ifaddrs *ifaddr, *ifa;
+    static char ip[INET_ADDRSTRLEN];
+
+    if (getifaddrs(&ifaddr) == -1)
+        return false;
+
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL)
+            continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
+            inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip));
+            if (strncmp(ip, "192.", 4) == 0) {
+                freeifaddrs(ifaddr);
+                strncpy(string, ip, length);
+                return true;
+            }
+        }
+    }
+
+    freeifaddrs(ifaddr);
+    return false;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static char *cloudflare_api_request(const char *endpoint, const char *method, const char *data) {
-
-    CURL *curl = curl_easy_init();
-    if (!curl)
-        return NULL;
-
     char url[512];
     snprintf(url, sizeof(url), "https://api.cloudflare.com/client/v4/zones/%s%s", cloudflare_config.zone_id, endpoint);
-
     char auth_header[512];
     snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", cloudflare_config.token);
-    struct curl_slist *headers = curl_slist_append(NULL, auth_header);
-    headers                    = curl_slist_append(headers, "Content-Type: application/json");
-
-    curl_response_t response = { .data = malloc(1), .size = 0 };
-
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback_xxx);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&response);
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
-
-    if (data)
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data);
-
-    CURLcode res = curl_easy_perform(curl);
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK) {
-        free(response.data);
-        return NULL;
-    }
-
-    return response.data;
-}
-
-static char *get_current_ip(void) {
-
-    CURL *curl = curl_easy_init();
-    if (!curl)
-        return NULL;
-
-    curl_response_t response = { .data = malloc(1), .size = 0 };
-
-    curl_easy_setopt(curl, CURLOPT_URL, "https://api.ipify.org/");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback_xxx);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-
-    CURLcode res = curl_easy_perform(curl);
-
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK) {
-        free(response.data);
-        return NULL;
-    }
-
-    return response.data;
+    const char *headers[] = { auth_header, "Content-Type: application/json" };
+    return http_request(url, method, headers, sizeof(headers) / sizeof(const char *), data);
 }
 
 static bool cloudflare_update(char *status_message, size_t status_size) {
@@ -305,26 +263,25 @@ static bool cloudflare_update(char *status_message, size_t status_size) {
         return false;
     }
 
-    char *current_ip = get_current_ip();
-    if (!current_ip) {
+    char public_ip[64];
+    if (!get_public_ip(public_ip, sizeof(public_ip))) {
         snprintf(status_message, status_size, "failed to get current IP address");
         json_object_put(records_json);
         free(records_response);
         return false;
     }
 
-    if (strcmp(current_ip, record_ip) == 0) {
-        snprintf(status_message, status_size, "IP valid at %s", current_ip);
+    if (strcmp(public_ip, record_ip) == 0) {
+        snprintf(status_message, status_size, "IP valid at %s", public_ip);
         json_object_put(records_json);
         free(records_response);
-        free(current_ip);
         return true;
     }
 
     json_object *update_json = json_object_new_object();
     json_object_object_add(update_json, "name", json_object_new_string(cloudflare_config.dns_name));
     json_object_object_add(update_json, "type", json_object_new_string("A"));
-    json_object_object_add(update_json, "content", json_object_new_string(current_ip));
+    json_object_object_add(update_json, "content", json_object_new_string(public_ip));
     json_object_object_add(update_json, "proxied", json_object_new_boolean(false));
     json_object_object_add(update_json, "ttl", json_object_new_int(600));
 
@@ -347,9 +304,7 @@ static bool cloudflare_update(char *status_message, size_t status_size) {
         }
         free(update_response);
     }
-    snprintf(status_message, status_size, "IP update %s from %s to %s", success ? "succeeded" : "failed", record_ip, current_ip);
-
-    free(current_ip);
+    snprintf(status_message, status_size, "IP update %s from %s to %s", success ? "succeeded" : "failed", record_ip, public_ip);
 
     return success;
 }
@@ -360,30 +315,6 @@ static bool cloudflare_update(char *status_message, size_t status_size) {
 #include <miniupnpc/miniupnpc.h>
 #include <miniupnpc/upnpcommands.h>
 #include <miniupnpc/upnperrors.h>
-
-static char *get_local_ip(void) {
-    struct ifaddrs *ifaddr, *ifa;
-    static char ip[INET_ADDRSTRLEN];
-
-    if (getifaddrs(&ifaddr) == -1)
-        return NULL;
-
-    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == NULL)
-            continue;
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
-            inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip));
-            if (strncmp(ip, "192.", 4) == 0) {
-                freeifaddrs(ifaddr);
-                return ip;
-            }
-        }
-    }
-
-    freeifaddrs(ifaddr);
-    return NULL;
-}
 
 static bool upnp_update_single(const upnp_mapping_t *mapping, struct UPNPUrls *urls, struct IGDdatas *data, const char *local_ip, const char *externalIPAddress,
                                char *status_message, size_t status_size) {
@@ -437,8 +368,8 @@ static bool upnp_update(char *status_message, size_t status_size) {
         return true;
     }
 
-    char *local_ip = get_local_ip();
-    if (!local_ip) {
+    char local_ip[64];
+    if (!get_local_ip(local_ip, sizeof(local_ip))) {
         snprintf(status_message, status_size, "failed to get local IP address");
         return false;
     }
@@ -491,43 +422,9 @@ static bool upnp_update(char *status_message, size_t status_size) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 static bool check_connectivity(char *status_message, size_t status_size) {
-
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        snprintf(status_message, status_size, "failed to initialize");
-        return false;
-    }
-
-    curl_easy_setopt(curl, CURLOPT_URL, connectivity_config.url);
-    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-    CURLcode res = curl_easy_perform(curl);
-
-    long response_code    = 0;
-    curl_off_t total_time = 0;
-    long header_size = 0;
-
-    if (res == CURLE_OK) {
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-        curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME_T, &total_time);
-        curl_easy_getinfo(curl, CURLINFO_HEADER_SIZE, &header_size);
-    }
-
-    curl_easy_cleanup(curl);
-
-    bool success = (res == CURLE_OK && response_code > 0);
     char details[256];
-    if (res != CURLE_OK)
-        snprintf(details, sizeof(details), "%s", curl_easy_strerror(res));
-    else if (response_code == 0)
-        snprintf(details, sizeof(details), "no response");
-    else
-        snprintf(details, sizeof(details), "HTTP %ld, %.3fms, %ld bytes", response_code, (double)total_time / 1000.0, header_size);
-
+    bool success = http_head(connectivity_config.url, details, sizeof(details));
     snprintf(status_message, status_size, "connection to '%s' %s (%s)", connectivity_config.url, success ? "succeeded" : "failed", details);
-
     return success;
 }
 
@@ -536,9 +433,7 @@ static bool check_connectivity(char *status_message, size_t status_size) {
 
 static bool do_heartbeat(char *status_message, size_t status_size) {
     static unsigned long counter = 0;
-
     snprintf(status_message, status_size, "daemon active (%lu)", ++counter);
-
     return true;
 }
 
@@ -613,6 +508,7 @@ void process_loop(void) {
 // -----------------------------------------------------------------------------------------------------------------------------------------
 
 bool config_load_upnp_mappings(void) {
+
     upnp_config.count = 0;
 
     const char *service  = config_get_string("upnp-service", "");
@@ -725,11 +621,11 @@ int main(int argc, const char **argv) {
         return EXIT_FAILURE;
     }
 
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    http_begin();
     publish_status("startup", true, "daemon started", true);
     process_loop();
     publish_status("shutdown", true, "daemon stopped", true);
-    curl_global_cleanup();
+    http_end();
 
     if (mqtt_enabled)
         mqtt_end();
