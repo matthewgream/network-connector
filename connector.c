@@ -21,12 +21,15 @@
 #include <unistd.h>
 
 #include "include/util_linux.h"
+
 #define MQTT_CONNECT_TIMEOUT 60
 #define MQTT_PUBLISH_QOS 0
 #define MQTT_PUBLISH_RETAIN false
 #include "include/mqtt_linux.h"
+
 #define CONFIG_MAX_ENTRIES 48
 #include "include/config_linux.h"
+
 #include "include/http_linux.h"
 
 // -----------------------------------------------------------------------------------------------------------------------------------------
@@ -154,25 +157,21 @@ static bool get_public_ip(char *string, size_t length) { return http_get(IP_ADDR
 
 static bool get_local_ip(char *string, size_t length) {
     struct ifaddrs *ifaddr, *ifa;
-    static char ip[INET_ADDRSTRLEN];
-
     if (getifaddrs(&ifaddr) == -1)
         return false;
-
     for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == NULL)
             continue;
         if (ifa->ifa_addr->sa_family == AF_INET) {
             struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
-            inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip));
-            if (strncmp(ip, "192.", 4) == 0) {
+            char ip[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip)) != NULL && (strncmp(ip, "192.", 4) == 0 || strncmp(ip, "10.", 3) == 0)) {
                 freeifaddrs(ifaddr);
                 strncpy(string, ip, length);
                 return true;
             }
         }
     }
-
     freeifaddrs(ifaddr);
     return false;
 }
