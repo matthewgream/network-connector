@@ -34,7 +34,9 @@ format:
 	clang-format -i $(TARGET).c include/*.h
 test: $(TARGET)
 	./$(TARGET) --config $(TARGET).$(HOSTNAME).default
-.PHONY: all clean format test lint
+latency:
+	journalctl -u network-connector | analysis/latency.js
+.PHONY: all clean format test lint latency
 
 ##
 
