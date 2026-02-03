@@ -6,7 +6,10 @@ function parseTimestamp(line) {
     const match = line.match(/^(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})/);
     if (!match) return undefined;
     const months = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
-    return new Date(new Date().getFullYear(), months[match[1]], parseInt(match[2]), parseInt(match[3]), parseInt(match[4]), parseInt(match[5]));
+    const ts = new Date(new Date().getFullYear(), months[match[1]], parseInt(match[2]), parseInt(match[3]), parseInt(match[4]), parseInt(match[5]));
+    if (ts > new Date()) 
+        ts.setFullYear(ts.getFullYear() - 1);
+    return ts;
 }
 
 function parseLatency(line) {
