@@ -90,7 +90,7 @@ async function main() {
 
     const days = groupByDay(data);
     console.log('\n=== DAILY LATENCY (ms) ===\n');
-    console.log('Period            │    N   │    p50 │    p95 │    p99 │    Min │    Max');
+    console.log('Period            │      N │    p50 │    p95 │    p99 │    Min │    Max');
     console.log('──────────────────┼────────┼────────┼────────┼────────┼────────┼───────');
     for (const dayIndex of [...days.keys()].sort((a, b) => a - b)) {
         const s = calcStats(days.get(dayIndex));
@@ -120,7 +120,7 @@ async function main() {
 
     const hours = groupByHour(data);
     console.log('\n=== TIME OF DAY (ms) ===\n');
-    console.log('Hour  │    N   │    p50 │    p95 │    p99 │    Min │    Max │ Histogram');
+    console.log('Hour  │      N │    p50 │    p95 │    p99 │    Min │    Max │ Histogram');
     console.log('──────┼────────┼────────┼────────┼────────┼────────┼────────┼──────────────────────────');
     const maxP95 = [...hours.values()].map((v) => calcStats(v).p95).reduce((a, b) => Math.max(a, b));
     for (let hour = 0; hour < 24; hour++) {
